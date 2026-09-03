@@ -1,0 +1,386 @@
+// LeadForge AI — database schema
+// Money is ALWAYS stored as integer cents (never floats) — see src/lib/money.ts
+// Every tenant-scoped table carries businessId so every query can (and must) filter by it.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Identity ----------
+
+model User {
+  id           String           @id @default(cuid())
+  email        String           @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  memberships  BusinessMember[]
+}
+
+model Business {
+  id              String           @id @default(cuid())
+  name            String
+  category        String? // e.g. "Painting", "Electrical", "Plumbing"
+  phone           String?
+  email           String?
+  address         String?
+  currency        String           @default("USD")
+  taxLabel        String           @default("Tax")
+  taxRateBps      Int              @default(0) // basis points, e.g. 750 = 7.5%
+  logoUrl         String?
+  quotePrefix     String           @default("Q")
+  invoicePrefix   String           @default("INV")
+  quoteTerms      String?
+  depositPercent  Int              @default(0) // 0-100
+  onboardingStep  Int              @default(0) // 0=not started .. 5=complete
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  members         BusinessMember[]
+  customers       Customer[]
+  leads           Lead[]
+  services        Service[]
+  quotes          Quote[]
+  jobs            Job[]
+  invoices        Invoice[]
+  followUps       FollowUp[]
+  activityEvents  ActivityEvent[]
+}
+
+enum BusinessRole {
+  OWNER
+  MEMBER
+}
+
+model BusinessMember {
+  id         String       @id @default(cuid())
+  businessId String
+  userId     String
+  role       BusinessRole @default(OWNER)
+  createdAt  DateTime     @default(now())
+
+  business   Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, userId])
+  @@index([userId])
+}
+
+// ---------- Customers & leads ----------
+
+model Customer {
+  id         String    @id @default(cuid())
+  businessId String
+  name       String
+  phone      String?
+  email      String?
+  address    String?
+  notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  leads      Lead[]
+  quotes     Quote[]
+  jobs       Job[]
+  invoices   Invoice[]
+  followUps  FollowUp[]
+
+  @@index([businessId])
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  QUOTE_SENT
+  ACCEPTED
+  LOST
+  CONVERTED
+}
+
+enum LeadSource {
+  MANUAL
+  WEBSITE_FORM
+  WHATSAPP
+  PHONE
+  EMAIL
+  REFERRAL
+  OTHER
+}
+
+model Lead {
+  id                String       @id @default(cuid())
+  businessId        String
+  customerId        String?
+  customerName      String
+  phone             String?
+  email             String?
+  source            LeadSource   @default(MANUAL)
+  inquiryText       String
+  serviceRequested  String?
+  location          String?
+  budgetCents       Int?
+  status            LeadStatus   @default(NEW)
+  notes             String?
+  aiAnalysis        Json? // { missingInfo: string[], followUpQuestions: string[], urgency, jobSizeEstimate, intent } — always AI-labeled, never fabricated facts
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  lastContactAt     DateTime?
+  followUpAt        DateTime?
+
+  business          Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer          Customer?    @relation(fields: [customerId], references: [id])
+  messages          LeadMessage[]
+  quotes            Quote[]
+  followUps         FollowUp[]
+
+  @@index([businessId, status])
+}
+
+enum MessageSender {
+  CUSTOMER
+  BUSINESS
+  AI
+}
+
+model LeadMessage {
+  id        String        @id @default(cuid())
+  leadId    String
+  sender    MessageSender
+  body      String
+  createdAt DateTime      @default(now())
+
+  lead      Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+}
+
+// ---------- Services & pricing ----------
+
+model Service {
+  id                   String   @id @default(cuid())
+  businessId           String
+  name                 String
+  description          String?
+  unit                 String   @default("job") // e.g. "sqm", "hour", "room", "job"
+  defaultUnitPriceCents Int     @default(0)
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now())
+
+  business             Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+}
+
+// ---------- Quotes ----------
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  VIEWED
+  ACCEPTED
+  CHANGES_REQUESTED
+  EXPIRED
+}
+
+model Quote {
+  id                 String        @id @default(cuid())
+  businessId         String
+  leadId             String?
+  customerId         String
+  quoteNumber        String
+  publicId           String        @unique @default(cuid()) // used in the public share URL
+  status             QuoteStatus   @default(DRAFT)
+  currency           String        @default("USD")
+  subtotalCents      Int           @default(0)
+  discountCents      Int           @default(0)
+  taxCents           Int           @default(0)
+  totalCents         Int           @default(0)
+  depositCents       Int           @default(0)
+  notes              String?
+  terms              String?
+  expiresAt          DateTime?
+  viewedAt           DateTime?
+  acceptedAt         DateTime?
+  changesRequestedAt DateTime?
+  aiGenerated        Boolean       @default(false)
+  aiRationale        String? // plain-language note on how the AI draft was produced, shown to the owner before they send it
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  business           Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead               Lead?         @relation(fields: [leadId], references: [id])
+  customer           Customer      @relation(fields: [customerId], references: [id])
+  items              QuoteItem[]
+  events             QuoteEvent[]
+  job                Job?
+
+  @@unique([businessId, quoteNumber])
+  @@index([businessId, status])
+}
+
+model QuoteItem {
+  id             String   @id @default(cuid())
+  quoteId        String
+  description    String
+  quantity       Decimal  @default(1) @db.Decimal(10, 2)
+  unitPriceCents Int
+  discountCents  Int      @default(0)
+  lineTotalCents Int
+  sortOrder      Int      @default(0)
+
+  quote          Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@index([quoteId])
+}
+
+enum QuoteEventType {
+  CREATED
+  SENT
+  VIEWED
+  ACCEPTED
+  CHANGES_REQUESTED
+  EXPIRED
+}
+
+model QuoteEvent {
+  id        String         @id @default(cuid())
+  quoteId   String
+  type      QuoteEventType
+  metadata  Json?
+  createdAt DateTime       @default(now())
+
+  quote     Quote          @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@index([quoteId])
+}
+
+// ---------- Jobs ----------
+
+enum JobStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Job {
+  id             String    @id @default(cuid())
+  businessId     String
+  customerId     String
+  quoteId        String?   @unique
+  service        String
+  scheduledAt    DateTime?
+  assignedWorker String?
+  status         JobStatus @default(SCHEDULED)
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer       Customer  @relation(fields: [customerId], references: [id])
+  quote          Quote?    @relation(fields: [quoteId], references: [id])
+  invoice        Invoice?
+
+  @@index([businessId, status])
+}
+
+// ---------- Invoices ----------
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  OVERDUE
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  businessId     String
+  customerId     String
+  jobId          String?       @unique
+  invoiceNumber  String
+  status         InvoiceStatus @default(DRAFT)
+  currency       String        @default("USD")
+  subtotalCents  Int           @default(0)
+  discountCents  Int           @default(0)
+  taxCents       Int           @default(0)
+  totalCents     Int           @default(0)
+  dueAt          DateTime?
+  paidAt         DateTime?
+  notes          String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  business       Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer       Customer      @relation(fields: [customerId], references: [id])
+  job            Job?          @relation(fields: [jobId], references: [id])
+  items          InvoiceItem[]
+
+  @@unique([businessId, invoiceNumber])
+  @@index([businessId, status])
+}
+
+model InvoiceItem {
+  id             String  @id @default(cuid())
+  invoiceId      String
+  description    String
+  quantity       Decimal @default(1) @db.Decimal(10, 2)
+  unitPriceCents Int
+  lineTotalCents Int
+  sortOrder      Int     @default(0)
+
+  invoice        Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+// ---------- Follow-ups & activity/audit log ----------
+
+enum FollowUpStatus {
+  PENDING
+  SENT
+  DISMISSED
+}
+
+model FollowUp {
+  id         String         @id @default(cuid())
+  businessId String
+  leadId     String?
+  customerId String?
+  dueAt      DateTime
+  channel    String         @default("manual") // "whatsapp" | "email" | "manual"
+  message    String?
+  status     FollowUpStatus @default(PENDING)
+  createdAt  DateTime       @default(now())
+
+  business   Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead       Lead?          @relation(fields: [leadId], references: [id])
+  customer   Customer?      @relation(fields: [customerId], references: [id])
+
+  @@index([businessId, status, dueAt])
+}
+
+// Audit log — every important state change, for security review and "what happened to this lead" timelines.
+model ActivityEvent {
+  id         String   @id @default(cuid())
+  businessId String
+  userId     String?
+  type       String // e.g. "lead.created", "quote.sent", "quote.accepted", "invoice.paid"
+  entityType String // "lead" | "quote" | "job" | "invoice" | "customer"
+  entityId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, entityType, entityId])
+  @@index([businessId, createdAt])
+}
